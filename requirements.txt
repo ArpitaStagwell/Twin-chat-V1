@@ -1,9 +1,0 @@
-fastapi
-uvicorn
-pandas
-numpy
-scikit-learn
-chromadb
-pydantic
-ollama
-python-multipart
