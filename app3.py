@@ -439,167 +439,153 @@ You are {name}, from the **{cluster_name}** cluster.
 
 
 # ============================================================
-# 1️⃣ App Setup
+# 8️⃣ Streamlit App Flow Implementation
 # ============================================================
-app = FastAPI(
-    title="Persona Explorer API (Ollama + Guardrails)",
-    version="3.0.0",
-    description=(
-        "Replicates Streamlit Persona Explorer:\n"
-        "1️⃣ User query → get clusters\n"
-        "2️⃣ Choose cluster → view personas\n"
-        "3️⃣ Optionally refine\n"
-        "4️⃣ Select persona → guarded chat"
-    ),
-)
 
-# ============================================================
-# 2️⃣ Request Schemas
-# ============================================================
-class QueryRequest(BaseModel):
-    query: str
-    top_k: Optional[int] = 3
+# --- Step 1: User query for clusters ---
+query = st.text_input(
+    "**Step 1:** Describe your audience to find relevant clusters (e.g., 'Female aged between 25 to 34 with high net worth'):"
+).strip()
 
-class RefineRequest(BaseModel):
-    query: str
-    top_k: Optional[int] = 5
+if query:
+    # --- Step 2: Find top clusters ---
+    results = query_personas(query, persona_df, embedder)
+    st.subheader("🔍 Top Matching Clusters")
 
-class ChatRequest(BaseModel):
-    message: str
+    cluster_map = {
+        row["behavior_cluster"]: f"🧩 {row['cluster_name']} (Similarity: {row['similarity']:.2f})"
+        for _, row in results.iterrows()
+    }
 
+    # Display clusters with LLM summaries
+    for i, row in results.iterrows():
+        cluster_id = row['behavior_cluster']
+        cluster_name = row['cluster_name']
+        
+        # Generate the LLM summary for the entire cluster
+        llm_summary = get_cluster_llm_summary(cluster_id, persona_df, summarizer, llm_available) 
 
-# ============================================================
-# 3️⃣ STEP 1 — User query → find relevant clusters
-# ============================================================
-@app.post("/query_clusters")
-def query_clusters(req: QueryRequest):
-    results = query_clusters_logic(req.query, top_k=req.top_k)
-    if results.empty:
-        raise HTTPException(status_code=404, detail="No matching clusters found.")
-    
-    # For parity with Streamlit display, attach LLM summaries here
-    cluster_summaries = []
-    for _, row in results.iterrows():
-        cid = int(row["behavior_cluster"])
-        llm_summary = get_cluster_llm_summary(cid)
-        cluster_summaries.append({
-            "cluster_id": cid,
-            "cluster_name": row["cluster_name"],
-            "similarity": round(float(row["similarity"]), 3),
-            "summary": llm_summary
-        })
-    
-    return cluster_summaries
+        st.markdown(f"**{i+1}. {cluster_name}** — _Similarity: {row['similarity']:.2f}_")
+        st.markdown(f"**Essence:** _{llm_summary}_") # Display the LLM summary
 
-
-# ============================================================
-# 4️⃣ STEP 2 — Get all personas for selected cluster
-# ============================================================
-@app.get("/cluster/{cluster_id}/personas")
-def get_cluster_personas(cluster_id: int = Path(..., ge=0)):
-    cluster_personas = persona_df[persona_df["behavior_cluster"] == cluster_id].copy()
-    if cluster_personas.empty:
-        raise HTTPException(status_code=404, detail="Cluster not found.")
-    
-    # Return list of persona summaries like Streamlit “initial list”
-    personas = []
-    for idx, row in cluster_personas.iterrows():
-        name = deterministic_name_for_persona(idx, row.get("gender_imputed", ""))
-        brief = row.get("persona_summary", "")[:200]
-        personas.append({
-            "persona_id": int(idx),
-            "persona_name": name,
-            "gender": row.get("gender_imputed", ""),
-            "age": row.get("age_imputed", ""),
-            "summary": brief
-        })
-    return personas
-
-
-# ============================================================
-# 5️⃣ STEP 3 — Optionally refine persona list with new query
-# ============================================================
-@app.post("/cluster/{cluster_id}/refine_personas")
-def refine_personas(cluster_id: int, req: RefineRequest):
-    cluster_personas = persona_df[persona_df["behavior_cluster"] == cluster_id].copy()
-    if cluster_personas.empty:
-        raise HTTPException(status_code=404, detail="Cluster not found.")
-
-    refined = filter_and_rank_personas_logic(cluster_personas, req.query, top_k=req.top_k)
-    if refined.empty:
-        raise HTTPException(status_code=404, detail=f"No personas matched refinement '{req.query}'.")
-
-    refined_list = []
-    for idx, row in refined.iterrows():
-        name = deterministic_name_for_persona(idx, row.get("gender_imputed", ""))
-        brief = row.get("persona_summary", "")[:200]
-        refined_list.append({
-            "persona_id": int(idx),
-            "persona_name": name,
-            "gender": row.get("gender_imputed", ""),
-            "age": row.get("age_imputed", ""),
-            "summary": brief
-        })
-    return refined_list
-
-
-# ============================================================
-# 6️⃣ STEP 4 — Start chat (from initial or refined persona list)
-# ============================================================
-@app.get("/persona/{persona_id}/start_chat")
-def start_persona_chat(persona_id: int):
-    """
-    Start chat after selecting a persona (either from initial or refined list).
-    Returns initial greeting same as Streamlit.
-    """
-    if persona_id < 0 or persona_id >= len(persona_df):
-        raise HTTPException(status_code=404, detail="Persona not found.")
-
-    persona = persona_df.loc[persona_id]
-    persona_name = deterministic_name_for_persona(persona_id, persona.get("gender_imputed", ""))
-    cluster_name = persona.get("cluster_name", "Unknown Cluster")
-    age = persona.get("age_imputed", "")
-    gender = persona.get("gender_imputed", "")
-    summary = persona.get("persona_summary", "")
-
-    greeting = (
-        f"👋 Hi, I’m {persona_name}. I’m part of the **{cluster_name}** cluster — "
-        f"a {age}-year-old {gender.lower()} who behaves like this: "
-        f"{summary[:180]}... Nice to meet you!"
+    # --- Step 3: Cluster selection ---
+    selected_cluster = st.selectbox(
+        "**Step 2a:** Select a cluster to explore:",
+        options=list(cluster_map.keys()),
+        format_func=lambda x: cluster_map.get(x, "Select a cluster"),
     )
-    return {
-        "persona_id": persona_id,
-        "persona_name": persona_name,
-        "cluster_name": cluster_name,
-        "greeting": greeting
-    }
 
+    cluster_name = results.loc[
+        results["behavior_cluster"] == selected_cluster, "cluster_name"
+    ].values[0]
+    cluster_personas = persona_df[persona_df["behavior_cluster"] == selected_cluster].copy()
 
-# ============================================================
-# 7️⃣ STEP 5 — Continue chat (guardrails + RAG)
-# ============================================================
-@app.post("/persona/{persona_id}/chat")
-def chat_with_persona(persona_id: int, req: ChatRequest):
-    try:
-        reply = persona_chat_logic(persona_id, req.message)
-        return {"persona_id": persona_id, "reply": reply}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Chat failed: {e}")
+    st.markdown("---")
+    st.markdown(f"### 👥 Step 2b: Initial Persona List (Cluster: {cluster_name})")
 
+    # --- Step 4: Initial Filter & Ranking (Applies demographic/semantic filter from initial query) ---
+    initial_refined = filter_and_rank_personas(
+        cluster_personas, query, embedder, top_k=10 # Show up to 10 for the starting list
+    )
 
-# ============================================================
-# 8️⃣ Root Endpoint
-# ============================================================
-@app.get("/")
-def root():
-    return {
-        "message": "🧠 Persona Explorer API (Ollama + Guardrails) is running",
-        "flow": {
-            "1": "POST /query_clusters → Get top clusters + summaries",
-            "2": "GET /cluster/{id}/personas → View all personas in cluster",
-            "3": "POST /cluster/{id}/refine_personas → Filter personas",
-            "4": "GET /persona/{id}/start_chat → Start chat",
-            "5": "POST /persona/{id}/chat → Continue chat",
-            "Swagger": "/docs"
-        }
-    }
+    st.markdown(f"##### Showing top {len(initial_refined)} most relevant personas in '{cluster_name}' for **'{query}'**:")
+
+    # Display the initial, relevant list
+    initial_persona_options = {}
+    for idx, row in initial_refined.iterrows():
+        name = assign_unique_name(row["gender_imputed"], idx)
+        brief = smart_persona_brief(row, summarizer, llm_available)
+        st.markdown(f"• **{idx}**: **{name}** — _{brief}_")
+        initial_persona_options[idx] = name
+        
+    # --- Consolidated Selection/Refinement Block ---
+    st.markdown("---")
+    st.markdown("### 🎯 Step 3: Choose to Chat Now or Refine")
+
+    chosen_persona_id = None
+    
+    # Define the format func for the initial/final list
+    def persona_format_func(i):
+        row = persona_df.loc[i] 
+        name = assign_unique_name(row['gender_imputed'], i)
+        return f"{i}: {name} — {smart_persona_brief(row, summarizer, llm_available)}"
+    
+    # Option A: Initial Selection Dropdown
+    st.markdown("##### Option A: Chat with a Persona from the Initial List (Skip refinement)")
+
+    initial_selection = st.selectbox(
+        "Select a Persona to start chatting immediately:",
+        options=[None] + initial_refined.index.tolist(),
+        format_func=lambda i: "--- Select Persona to Chat Now ---" if i is None else persona_format_func(i),
+        key="initial_selection_box"
+    )
+
+    if initial_selection is not None:
+        chosen_persona_id = initial_selection
+        
+    else:
+        # Option B: Refinement Path
+        st.markdown("---")
+        st.markdown("##### Option B: Further Refine the Search")
+        refine_query = st.text_input(
+            "**Enter refinement query.** Use a detailed query (e.g., 'only women who overspend on travel'):",
+            key="refine_query_input"
+        ).strip()
+
+        if refine_query:
+            # Apply the second filter/rank on the already filtered list (top_k=5)
+            # IMPORTANT: Re-run filter_and_rank_personas on the full set of personas within the cluster,
+            # using the new, more detailed query to get the best match, but keep the demographic filtering active.
+            final_refined = filter_and_rank_personas(cluster_personas, refine_query, embedder, top_k=5)
+
+            if final_refined.empty:
+                st.warning(f"⚠️ None found with the refinement search: **'{refine_query}'**. Please try a different query or select from the initial list above.")
+            else:
+                count = len(final_refined)
+                st.markdown(f"##### ✨ Found {count} BEST set of personas for **'{refine_query}'**:")
+                
+                # Display the refined list
+                for idx, row in final_refined.iterrows():
+                    name = assign_unique_name(row["gender_imputed"], idx)
+                    brief = smart_persona_brief(row, summarizer, llm_available)
+                    st.markdown(f"• **{idx}**: **{name}** — _{brief}_")
+
+                # Dropdown for refined list selection
+                refined_selection = st.selectbox(
+                    "Select persona from the refined list:",
+                    final_refined.index.tolist(),
+                    format_func=persona_format_func,
+                    key="refined_selection_box"
+                )
+                chosen_persona_id = refined_selection
+    
+    # --- Step 4/5: Chat Setup (Conditional) ---
+    if chosen_persona_id is not None:
+        persona_choice = chosen_persona_id
+
+        persona = persona_df.loc[persona_choice]
+        persona_name = assign_unique_name(persona["gender_imputed"], persona_choice)
+        st.markdown("---")
+        st.markdown(f"### 💬 Step 4: Chat with {persona_name} (ID: {persona_choice})")
+
+        # --- Step 6-8: Chat memory, input, and display ---
+        chat_key = f"chat_history_{persona_choice}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = [
+                (persona_name, f"👋 Hi, I’m {persona_name}. I'm part of the **{persona['cluster_name']}** cluster, which means I'm very particular about my spending habits. Nice to meet you!")
+            ]
+
+        user_input = st.chat_input("Ask a question to your persona:")
+        if user_input:
+            with st.spinner(f"**{persona_name}** is thinking..."):
+                # Pass only the persona ID to avoid caching issues with models/embedder
+                reply = persona_chat_response(persona_choice, user_input)
+            st.session_state[chat_key].append(("You", user_input))
+            st.session_state[chat_key].append((persona_name, reply))
+
+        # Display chat history
+        for speaker, msg in st.session_state[chat_key]:
+            if speaker == "You":
+                st.chat_message("user").markdown(msg)
+            else:
+                st.chat_message("assistant").markdown(msg)
