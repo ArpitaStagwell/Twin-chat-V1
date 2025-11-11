@@ -26,16 +26,16 @@ OLLAMA_EMBED_MODEL = "mxbai-embed-large"
 OLLAMA_CHAT_MODEL = "mistral"
 
 CLUSTER_NAME_MAP = {
-    0: "Family Prime Managers",
-    1: "Ambitious Credit Starters",
-    2: "Affluent Asset Maximizers",
-    3: "Mid-Range Auto-Focused",
-    4: "Novice Financial Explorers",
-    5: "Mobile Sub-Prime Debtors",
-    6: "Slowing Super-Prime",
-    7: "Budget-Minded Tenants",
-    8: "Established Family Builders",
-    9: "Conventional Consumerists"
+    0:"Affluent, Credit-active Digital Users"
+    2:"High Net Worth Mail Responders"
+    3:"High-Income Young Adult Credit Users"
+    4:"Established Hispanic Consumers"
+    5:"Young, Low-Credit, Tech-Savvy Consumers"
+    6:"High-income Credit Active Professionals"
+    7:"Moderate Credit Users with Frequent Fast Food Intake"
+    8:"College-Educated Established Consumers"
+    9:"Sub-Prime Credit Users"
+    10:"Active Political Advocates & Community Involvers"
 }
 
 # Pools for deterministic persona names (used instead of Streamlit's session state)
