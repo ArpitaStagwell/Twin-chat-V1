@@ -7,23 +7,23 @@ from typing import Optional, List, Dict, Any
 from sklearn.metrics.pairwise import cosine_similarity
 
 # Ollama & Chroma (RAG)
+# Note: The 'ollama' Python library will automatically use the OLLAMA_HOST 
+# environment variable if set. We define the default base URL here for clarity.
 from ollama import embeddings as ollama_embeddings, chat as ollama_chat
 import chromadb
-
-# Try to optionally load a local summarizer (same approach as Streamlit)
-try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-    TRANSFORMERS_AVAILABLE = True
-except Exception:
-    TRANSFORMERS_AVAILABLE = False
+# Removed: from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 
 # -----------------------------
-# Configs (same names/paths as Streamlit)
+# Configs (Updated for Ollama production path)
 # -----------------------------
 PERSONA_PATH = "final_behavior_personas_ready_for_embedding.csv"
 CHROMA_PATH = "chroma_persona_store"
+OLLAMA_BASE_URL = "http://localhost:11434"  # Default Ollama URL (Set OLLAMA_HOST env var for production!)
 OLLAMA_EMBED_MODEL = "mxbai-embed-large"
 OLLAMA_CHAT_MODEL = "mistral"
+
+# The local LLM summarizer is completely removed.
+llm_summarizer_available = True # We set this to True since Ollama is always used now.
 
 CLUSTER_NAME_MAP = {
     0:"Affluent, Credit-active Digital Users",
@@ -86,24 +86,28 @@ except Exception as e:
     chroma_collection = None
 
 # -----------------------------
-# Optional summarizer (try to follow streamlit behavior)
+# NEW: Ollama Summarization Helper
 # -----------------------------
-summarizer = None
-llm_summarizer_available = False
-if TRANSFORMERS_AVAILABLE:
+def ollama_summarize(prompt: str) -> str:
+    """Uses Ollama to generate a brief summary based on a given prompt."""
+    sys_prompt = "You are a concise summarization engine. Your only goal is to answer the user's question directly and briefly, respecting the word count or length limit."
     try:
-        # same model name as Streamlit attempt (may fail if not available)
-        model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto")
-        summarizer = pipeline("text-generation", model=model, tokenizer=tokenizer, temperature=0.4)
-        llm_summarizer_available = True
+        res = ollama_chat(
+            model=OLLAMA_CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": prompt}
+            ],
+            # Use lower temp for deterministic summarization
+            options={"temperature": 0.4} 
+        )
+        return res["message"]["content"].strip()
     except Exception:
-        summarizer = None
-        llm_summarizer_available = False
+        # Fallback to empty string if Ollama fails
+        return ""
 
 # -----------------------------
-# Helper functions (preserve streamlit implementations)
+# Helper functions (updated to use Ollama summarization)
 # -----------------------------
 def deterministic_name_for_persona(persona_index: int, gender: Optional[str]) -> str:
     """
@@ -123,7 +127,7 @@ def deterministic_name_for_persona(persona_index: int, gender: Optional[str]) ->
 
 def smart_persona_brief(row: Dict[str, Any]) -> str:
     """
-    One-line brief. Tries to call summarizer if available, otherwise truncates.
+    One-line brief. Tries to call Ollama summarizer, otherwise truncates.
     Matches streamlit behavior: one natural line under ~15 words.
     """
     gender = row.get("gender_imputed", "")
@@ -134,42 +138,42 @@ def smart_persona_brief(row: Dict[str, Any]) -> str:
         summary = "Behavioral details unavailable."
 
     compressed = summary.split(".")[0].strip()
-    if llm_summarizer_available and summarizer:
-        prompt = f"Summarize this persona in one natural line under 15 words:\n{summary}\nSummary:"
-        try:
-            out = summarizer(prompt, max_new_tokens=40)
-            gen = out[0].get("generated_text", "")
-            compressed = gen.split("Summary:")[-1].strip().replace("\n", " ")
-        except Exception:
-            compressed = compressed
+    
+    # --- START REPLACEMENT ---
+    if llm_summarizer_available:
+        prompt = f"Summarize this persona's core essence in one natural line under 15 words, focusing on their financial habits and goals:\n{summary}\nSummary:"
+        llm_summary = ollama_summarize(prompt)
+        if llm_summary:
+            compressed = llm_summary.split("Summary:")[-1].strip().replace("\n", " ")
+    # --- END REPLACEMENT ---
 
     # fallback tweaks from original
     if len(compressed.split()) < 3 and len(summary.split('.')) > 1:
         compressed = summary.split(".")[0].strip()
-
+        
     age_sentence = f"aged between {age_text} years" if "to" in age_text else f"aged {age_text}"
     return f"{gender} {age_sentence} from '{cluster_name}' — {compressed}"
 
 def get_cluster_llm_summary(cluster_id: int) -> str:
     """
-    Returns a concise (<= 20 words) cluster summary using LLM if available,
+    Returns a concise (<= 20 words) cluster summary using Ollama,
     otherwise a simple concatenation/truncation.
     """
     cluster_data = persona_df[persona_df["behavior_cluster"] == cluster_id]["persona_summary"].str.cat(sep=" | ")
     if not cluster_data:
         return "No summary available."
 
-    if llm_summarizer_available and summarizer:
+    # --- START REPLACEMENT ---
+    if llm_summarizer_available:
         prompt = f"Based on the following behavioral data, create a single, concise sentence (under 20 words) that describes the core essence and financial priority of this customer cluster:\n{cluster_data}\nSummary:"
-        try:
-            out = summarizer(prompt, max_new_tokens=40)
-            text = out[0].get("generated_text", "")
-            summary = text.split("Summary:")[-1].strip().replace("\n", " ")
+        llm_summary = ollama_summarize(prompt)
+        if llm_summary:
+            summary = llm_summary.split("Summary:")[-1].strip().replace("\n", " ")
             if len(summary.split()) > 25:
                 summary = summary.split(".")[0] + "..."
             return summary
-        except Exception:
-            pass
+    # --- END REPLACEMENT ---
+    
     # fallback: naive extraction
     return cluster_data.split("|")[0][:150] + ("..." if len(cluster_data) > 150 else "")
 
@@ -197,12 +201,13 @@ def extract_age_range_from_query(q: str) -> Optional[tuple]:
     return None
 
 # -----------------------------
-# Embedding helper using Ollama (fallback to error)
+# Embedding helper using Ollama (no change needed here)
 # -----------------------------
 def embed_texts_with_ollama(texts: List[str]) -> np.ndarray:
     vecs = []
     for t in texts:
         try:
+            # Uses the globally imported ollama_embeddings function
             r = ollama_embeddings(model=OLLAMA_EMBED_MODEL, prompt=t)
             vecs.append(r["embedding"])
         except Exception as e:
@@ -253,7 +258,7 @@ def filter_and_rank_personas_logic(cluster_personas: pd.DataFrame, query: str, t
     return ranked
 
 # -----------------------------
-# Guardrail filter — copied almost verbatim
+# Guardrail filter (no change needed here)
 # -----------------------------
 def guardrail_filter(user_input: str, persona_name: str, persona_context: str, cluster_name: str) -> Optional[str]:
     q = user_input.lower().strip()
@@ -404,6 +409,7 @@ Respond as this person, {persona_name} — not as a chatbot.
     # ⚫ 5. Generate final response via Ollama chat
     # -------------------------------------
     try:
+        # Uses the globally imported ollama_chat function
         res = ollama_chat(model=OLLAMA_CHAT_MODEL, messages=[{"role": "user", "content": prompt}])
         return res["message"]["content"]
     except Exception as e:
@@ -587,6 +593,7 @@ def chat_with_persona(persona_id: int, req: ChatRequest):
 def root():
     return {
         "message": "🧠 Persona Explorer API (Ollama + Guardrails) is running",
+        "ollama_base_url_check": OLLAMA_BASE_URL,
         "flow": {
             "1": "POST /query_clusters → Get top clusters + summaries",
             "2": "GET /cluster/{id}/personas → View all personas in cluster",
